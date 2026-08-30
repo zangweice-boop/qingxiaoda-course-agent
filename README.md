@@ -23,6 +23,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `agent.py` | agent 核心：意图识别 → 查评价库 → 按 SKILL.md 方法论组装回答；多模态输入处理；报告附件生成 |
 | `evals_client.py` | 评价库只读访问（复用 `skill/scripts/query_evals.py`，叠加 5 分钟缓存与 certifi SSL 修复） |
 | `skill/` | 技能包原样拷贝（SKILL.md 方法论、课程目录、查询脚本） |
+| `skill/README.md` | **面向最终用户**的智能体使用说明（能力/示例/数据边界/FAQ） |
 
 ## 协议实现清单（对照开发者指南）
 
