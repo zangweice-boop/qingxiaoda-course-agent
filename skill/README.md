@@ -85,3 +85,27 @@
 ## 在哪里使用
 
 在**清小搭智能体广场**搜索「选课指南」即可。如有疑问或建议，欢迎反馈给无穹书院课程评价系统的维护同学。
+
+## 安装到自己的 agent 客户端（进阶）
+
+想在自己的 agent 客户端（Claude Code、Cursor、Goose、OpenClaw 等支持 skill 机制的客户端）里直接用这个 skill？不需要部署服务——**整个 `skill/` 目录就是一份完整的 skill 技能包**。
+
+**前置条件**：Python 3.9+（脚本只用标准库，零第三方依赖）；客户端能访问公网。
+
+**安装步骤**：
+
+1. 把 `skill/` 目录拷贝到客户端的技能目录，**目录名必须与 `SKILL.md` 里的 `name` 一致**：
+
+   ```bash
+   # 以 Claude Code 为例（其他客户端路径见其文档）：
+   mkdir -p ~/.claude/skills
+   cp -r skill ~/.claude/skills/course-selection-guide
+   ```
+
+2. 确认结构完整：`SKILL.md`（技能定义）、`scripts/query_evals.py`（只读查询）、`references/selection-methods.md`（方法论）、`assets/course-catalog.json`（课程目录）。
+
+3. 验证：问「帮我选课」或「微积分哪个老师好」，应触发本 skill 并返回真实评价数据。
+
+**可选配置**：环境变量 `COURSE_EVAL_URL`（覆盖评价库接口地址）、`COURSE_EVAL_KEY`（覆盖只读凭据），不配则用默认值。
+
+**注意事项**：脚本只做只读查询、不写数据、不输出评价者身份信息；评价库不可达时如实转述并转方法论建议，不要编造评分；更新时 `git pull` 后重新拷贝 `skill/` 覆盖即可。
