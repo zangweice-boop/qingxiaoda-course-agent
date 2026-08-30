@@ -90,10 +90,15 @@
 
 想在自己的 agent 客户端（Claude Code、Cursor、Goose、OpenClaw 等支持 skill 机制的客户端）里直接用这个 skill？不需要部署服务——仓库里的 `skill/` 目录就是一份完整的 **skill 技能包**。
 
-**前置条件**
+**环境要求**
 
-- Python 3.9+（脚本只用标准库，**零第三方依赖**）
-- 客户端能访问公网（评价数据挂在公开的只读接口上）
+| 依赖 | 要求 | 检查 | 安装 |
+|---|---|---|---|
+| Python | ≥ 3.9（脚本只用标准库） | `python3 --version` | [python.org](https://www.python.org) 或系统包管理器 |
+| ripgrep（`rg`） | 客户端加载/索引 skill 时调用 | `rg --version` | Windows：`winget install BurntSushi.ripgrep.MSVC`；macOS：`brew install ripgrep`；Linux：`sudo apt install ripgrep` |
+| 公网访问 | 评价数据挂在公开只读接口上 | 浏览器能打开课程评价系统页面 | — |
+
+> **排查提示**：客户端加载 skill 报 `ripgrep execution failed` = 本机缺少 `rg`。按上表安装后重新加载即可；若客户端已在运行，重启客户端让 PATH 生效。
 
 **安装步骤**
 
@@ -115,7 +120,9 @@
    └── assets/course-catalog.json       # 培养方案课程目录
    ```
 
-3. 在客户端里验证：问「帮我选课」或「微积分哪个老师好」，应触发本 skill 并返回真实评价数据（均分、样本、评论信号）。
+3. 验证（两种方式任选）：
+   - 直接跑脚本自检环境：`python3 skill/scripts/query_evals.py --summary`（Windows 用 `python`），应输出库内课程评价总览；
+   - 在客户端里问「帮我选课」或「微积分哪个老师好」，应触发本 skill 并返回真实评价数据（均分、样本、评论信号）。
 
 **可选配置（环境变量，不配则用默认值）**
 
