@@ -7,8 +7,8 @@
 
 ```bash
 pip install -r requirements.txt
-export AGENT_API_KEY="sk-换成你的密钥"        # 必改
-# export PUBLIC_BASE_URL="https://你的域名"   # 有反向代理/公网域名时设置，用于拼附件下载地址
+export AGENT_API_KEY="sk-换成你的密钥"        # 必设：未设置将拒绝启动（无默认弱密钥）
+# export PUBLIC_BASE_URL="https://你的域名"   # 有反向代理/公网域名时设置，用于拼附件下载地址；缺省会告警并按请求 Host 头拼接
 # export ALLOW_PRIVATE_FILE_HOSTS=1          # 仅本地联调放行内网文件 URL，生产勿开
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
@@ -31,9 +31,10 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 - **L2 多模态**：
   - 输入 `file`：按 URL **当次拉取**（防签名过期），文本类（txt/markdown 等）解析并识别培养方案课程；二进制（pdf/word）如实说明只支持文本粘贴
   - 输入 `image_url` / `input_audio`：优雅降级为提示，不影响文本对话
-  - 输出 `x_soda.attachments`：总览/求推荐/明确要报告时生成 markdown 报告，非流式挂响应顶层、流式挂 stop 帧；只回传 `fileUrl`（本服务 `/files/...` 提供下载，清小搭会转存到自己的 OSS）
+  - 输出 `x_soda.attachments`：总览/求推荐/明确要报告时生成 markdown 报告，非流式挂响应顶层、流式挂 stop 帧；只回传 `fileUrl`（本服务 `/files/{uid}/{expiry}/{token}/...` 提供**签名 + 过期校验**的下载，清小搭会转存到自己的 OSS）
 - **sessionId**：接收并记日志；agent 设计为**无状态**（约束从全量 messages 解析），多轮追问天然可用
-- **SSRF 防护**：文件 URL 拉取前解析主机，拒绝私网/环回/保留地址（`ALLOW_PRIVATE_FILE_HOSTS=1` 仅限本地联调）
+- **SSRF 防护**：文件 URL 拉取前解析主机，拒绝私网/环回/保留地址（`ALLOW_PRIVATE_FILE_HOSTS=1` 仅限本地联调）；**重定向逐跳校验**，任何一跳落到内网即拒绝
+- **请求体上限**：`MAX_BODY_BYTES=1MB`，超大 body 返回 413（Content-Length 中间件 + chunked 兜底）
 - **超时纪律**：评价库查询 30s 超时 + 5 分钟缓存；文件拉取 20s；全链路远低于网关 120s 上限
 
 ## 自测（指南 §8 清单）

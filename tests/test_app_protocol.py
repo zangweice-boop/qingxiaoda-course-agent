@@ -8,12 +8,14 @@
 """
 import json
 import os
+import time
 
 os.environ["AGENT_API_KEY"] = "test-key"  # 必须在 import app 前设置
 
 import pytest
 from fastapi.testclient import TestClient
 
+import agent
 import app as app_mod
 from agent import AgentResult
 
@@ -186,3 +188,61 @@ def test_run_agent_receives_joined_history(client, monkeypatch):
     assert r.status_code == 200
     assert calls["all"] == "帮我选课\n秋季，保GPA"
     assert calls["last"] == "秋季，保GPA"
+
+
+# ---------- 安全加固 ----------
+
+def test_attachment_signed_download(client):
+    """附件 URL 带签名+过期：正确签名 200，篡改/过期/未知 uid 一律 404。"""
+    att = agent.make_attachment("# 报告\n测试", "r.md", "http://testserver")
+    uid, expiry, token, filename = att["fileUrl"].replace("http://testserver/files/", "").split("/", 3)
+    assert agent.FILE_REGISTRY[uid]["expiry"] == int(expiry)
+    try:
+        path = att["fileUrl"].replace("http://testserver", "")
+        r = client.get(path)
+        assert r.status_code == 200
+        assert r.content == "# 报告\n测试".encode()
+
+        bad = path.replace(f"/{token}/", f"/{'0' * 64}/", 1)
+        assert client.get(bad).status_code == 404
+
+        old = path.replace(f"/{expiry}/", f"/{int(time.time()) - 1}/", 1)
+        assert client.get(old).status_code == 404
+
+        assert client.get(f"/files/deadbeef/{expiry}/{token}/{filename}").status_code == 404
+    finally:
+        agent.FILE_REGISTRY[uid]["path"].unlink(missing_ok=True)
+        agent.FILE_REGISTRY.pop(uid, None)
+
+
+def test_startup_requires_api_key():
+    """AGENT_API_KEY 未设置时服务必须拒绝启动（不再有默认弱密钥）。"""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    env = {k: v for k, v in os.environ.items() if k != "AGENT_API_KEY"}
+    env["PYTHONIOENCODING"] = "utf-8"  # 子进程 stderr 统一 UTF-8，避免 Windows 控制台编码干扰
+    r = subprocess.run([sys.executable, "-c", "import app"], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", env=env, cwd=repo)
+    assert r.returncode != 0
+    assert "AGENT_API_KEY" in r.stderr
+
+
+def test_body_limit_content_length(client):
+    big = "x" * (app_mod.MAX_BODY_BYTES + 1)
+    r = client.post("/v1/chat/completions", headers=H, content=big)
+    assert r.status_code == 413
+
+
+def test_body_limit_chunked(client):
+    """无 Content-Length 的 chunked 超大 body 由 endpoint 兜底拒绝。"""
+
+    def gen():
+        yield b'{"messages":[{"role":"user","content":"'
+        yield b"x" * (app_mod.MAX_BODY_BYTES + 10)
+        yield b'"}]}'
+
+    r = client.post("/v1/chat/completions", headers=H, content=gen())
+    assert r.status_code == 413

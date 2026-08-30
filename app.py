@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -25,11 +26,32 @@ import agent
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("course-agent")
 
-API_KEY = os.environ.get("AGENT_API_KEY", "sk-course-guide-001")  # 部署时必须改
+API_KEY = os.environ.get("AGENT_API_KEY")
+if not API_KEY:
+    raise RuntimeError(
+        "AGENT_API_KEY 环境变量未设置：服务拒绝启动（防止使用默认弱密钥上线）。"
+        "请先 export AGENT_API_KEY=... 再启动。")
 MODEL_ID = "course-selection-guide"
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+if not PUBLIC_BASE_URL:
+    log.warning("PUBLIC_BASE_URL 未设置：附件下载地址将按请求 Host 头拼接，请在生产环境显式配置公网域名")
 
-app = FastAPI(title="course-selection-guide for qingxiaoda", version="1.0.0")
+MAX_BODY_BYTES = 1 * 1024 * 1024  # 请求体上限：messages 历史足够，防超大 body 占用内存
+
+app = FastAPI(title="course-selection-guide for qingxiaoda", version="1.1.0")
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    """有 Content-Length 时提前拒绝超大请求；chunked（无长度头）由 endpoint 内兜底。"""
+    cl = request.headers.get("content-length")
+    if cl:
+        try:
+            if int(cl) > MAX_BODY_BYTES:
+                return JSONResponse({"detail": "request body too large"}, status_code=413)
+        except ValueError:
+            pass
+    return await call_next(request)
 
 
 def check_auth(authorization: str | None, x_api_key: str | None):
@@ -38,7 +60,7 @@ def check_auth(authorization: str | None, x_api_key: str | None):
         token = authorization[len("Bearer "):]
     elif x_api_key:
         token = x_api_key
-    if token != API_KEY:
+    if not token or not hmac.compare_digest(token, API_KEY):
         raise HTTPException(status_code=401, detail="invalid credential")
 
 
@@ -101,7 +123,13 @@ async def chat_completions(request: Request,
                            x_api_key: str | None = Header(None)):
     check_auth(authorization, x_api_key)
     try:
-        body = await request.json()
+        raw = await request.body()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid body")
+    if len(raw) > MAX_BODY_BYTES:  # chunked（无 Content-Length）时由这里兜底
+        raise HTTPException(status_code=413, detail="request body too large")
+    try:
+        body = json.loads(raw)
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
 
@@ -170,11 +198,13 @@ async def chat_completions(request: Request,
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@app.get("/files/{uid}/{filename:path}")
-def serve_file(uid: str, filename: str):
-    """产物文件下载（无鉴权：清小搭收到 attachments 后会立即转存到自己的 OSS）。"""
+@app.get("/files/{uid}/{expiry}/{token}/{filename:path}")
+def serve_file(uid: str, expiry: str, token: str, filename: str):
+    """产物文件下载（签名 + 过期校验；清小搭收到 attachments 后会立即转存到自己的 OSS）。"""
     rec = agent.FILE_REGISTRY.get(uid)
     if not rec or not rec["path"].exists():
+        raise HTTPException(status_code=404, detail="file not found or expired")
+    if not agent.verify_file_token(uid, token, expiry):
         raise HTTPException(status_code=404, detail="file not found or expired")
     return FileResponse(rec["path"], media_type=rec["mime"], filename=rec["filename"])
 

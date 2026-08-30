@@ -190,3 +190,51 @@ def test_db_down_falls_back_to_methodology(monkeypatch):
     r = agent.run_agent(all_t, "秋季，保GPA", [{"type": "text", "text": "秋季，保GPA"}], "http://test")
     assert "评价库暂时查不到" in r.answer
     assert "押注分散" in r.answer
+
+
+# ---------- SSRF 防护 ----------
+
+def test_host_allowed_blocks_private():
+    assert agent._host_allowed("127.0.0.1") is False
+    assert agent._host_allowed("10.1.2.3") is False
+    assert agent._host_allowed("192.168.1.1") is False
+    assert agent._host_allowed("169.254.169.254") is False
+    assert agent._host_allowed("::1") is False
+    assert agent._host_allowed("no-such-host.invalid") is False
+
+
+def test_download_rejects_private_initial_host(monkeypatch):
+    monkeypatch.delenv("ALLOW_PRIVATE_FILE_HOSTS", raising=False)
+    text, note = agent.download_text_file("http://127.0.0.1/secret")
+    assert text is None
+    assert "已跳过" in note
+    text2, note2 = agent.download_text_file("file:///etc/passwd")
+    assert text2 is None
+    assert "协议不受支持" in note2
+
+
+def test_download_redirect_hop_to_private_blocked(monkeypatch):
+    """首跳主机放行（模拟公网域名），重定向目标落到私网 → 整次拉取被拒。"""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Redirect(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:9/secret")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://localhost:{srv.server_port}/go"
+        # 首跳放行、重定向目标 127.0.0.1 必须被拦
+        monkeypatch.setattr(agent, "_host_allowed", lambda host: host != "127.0.0.1")
+        text, note = agent.download_text_file(url)
+        assert text is None
+        assert "拉取失败" in note
+    finally:
+        srv.shutdown()

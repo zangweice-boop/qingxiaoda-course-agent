@@ -9,14 +9,18 @@
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
 import time
 import uuid
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,8 +31,28 @@ from evals_client import EvalsUnavailable
 
 SKILL_DIR = Path(__file__).resolve().parent / "skill"
 FILES_DIR = Path(__file__).resolve().parent / "generated_files"
-FILE_REGISTRY: dict[str, dict] = {}   # uid -> {"path","filename","mime"}
+FILE_REGISTRY: dict[str, dict] = {}   # uid -> {"path","filename","mime","expiry"}
 FILE_TTL = 24 * 3600                  # 产物只需在清小搭转存前的短时间内可下载
+# 附件下载签名密钥：进程级随机值；FILE_REGISTRY 本身是内存态，重启即全部失效
+FILE_SECRET = secrets.token_hex(32)
+
+
+def _file_token(uid: str, expiry: int) -> str:
+    return hmac.new(FILE_SECRET.encode(), f"{uid}:{expiry}".encode(), hashlib.sha256).hexdigest()
+
+
+def verify_file_token(uid: str, token: str, expiry) -> bool:
+    """校验附件下载签名：token 匹配且未过期（防未授权/越权下载）。"""
+    try:
+        expiry = int(expiry)
+    except (TypeError, ValueError):
+        return False
+    if expiry < int(time.time()):
+        return False
+    try:
+        return hmac.compare_digest(token, _file_token(uid, expiry))
+    except TypeError:
+        return False
 
 FOOTER = ("> 评价数据来自无穹书院课程评价系统（同学自发维护，10 分制自评），"
           "以最新评价为准，选课前可再查一次。")
@@ -191,15 +215,21 @@ def _cleanup_old_files():
 
 
 def make_attachment(text: str, filename: str, base_url: str) -> dict:
-    """把 markdown 报告落盘并生成 x_soda.attachments 条目（只回传 URL，不嵌字节）。"""
+    """把 markdown 报告落盘并生成 x_soda.attachments 条目（只回传 URL，不嵌字节）。
+
+    URL 带签名与过期时间：/files/{uid}/{expiry}/{token}/{filename}，下载需签名校验。
+    """
     FILES_DIR.mkdir(exist_ok=True)
     _cleanup_old_files()
     uid = uuid.uuid4().hex[:16]
     path = FILES_DIR / f"{uid}.md"
-    path.write_text(text, encoding="utf-8")
-    FILE_REGISTRY[uid] = {"path": path, "filename": filename, "mime": "text/markdown"}
+    path.write_text(text, encoding="utf-8", newline="\n")  # 统一 \n，跨平台字节一致
+    expiry = int(time.time()) + FILE_TTL
+    token = _file_token(uid, expiry)
+    FILE_REGISTRY[uid] = {"path": path, "filename": filename, "mime": "text/markdown",
+                          "expiry": expiry}
     return {
-        "fileUrl": f"{base_url.rstrip('/')}/files/{uid}/{quote(filename)}",
+        "fileUrl": f"{base_url.rstrip('/')}/files/{uid}/{expiry}/{token}/{quote(filename)}",
         "fileName": filename,
         "fileType": "text",
         "mimeType": "text/markdown",
@@ -226,11 +256,33 @@ def _host_allowed(host: str) -> bool:
     return True
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """重定向逐跳校验：任何一跳落到私网/环回/保留地址即拒绝（防 SSRF 重定向绕过）。
+
+    初始 URL 的主机校验在 download_text_file 里做；urllib 默认跟随 ≤10 次重定向，
+    若只校验首跳，攻击者可用公网域名 302 到内网地址绕过。此 handler 拦截每一跳。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if parsed.scheme not in ("http", "https") or not _host_allowed(parsed.hostname or ""):
+            raise urllib.error.HTTPError(newurl, code, "redirect to disallowed host", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _build_opener():
+    """带证书上下文与逐跳校验的 opener（certifi 缺失时回退系统默认）。"""
+    ctx = _ssl_ctx()
+    https_handler = (urllib.request.HTTPSHandler(context=ctx) if ctx
+                     else urllib.request.HTTPSHandler())
+    return urllib.request.build_opener(https_handler, _SafeRedirectHandler())
+
+
 def download_text_file(url: str) -> tuple[str | None, str]:
     """按 URL 拉取用户上传的文件，文本类返回内容，二进制返回 None。
 
     遵循清小搭多模态准入：只收 URL、当次立即拉取（防签名过期）、限制大小、
-    校验主机防 SSRF。返回 (文本或 None, 给用户看的说明)。
+    校验主机防 SSRF（含重定向逐跳校验）。返回 (文本或 None, 给用户看的说明)。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -239,9 +291,9 @@ def download_text_file(url: str) -> tuple[str | None, str]:
         return None, "文件链接主机不可达或不被允许，已跳过"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "course-guide-agent/1.0"})
-        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT, context=_ssl_ctx()) as resp:
+        with _build_opener().open(req, timeout=DOWNLOAD_TIMEOUT) as resp:
             raw = resp.read(MAX_FILE_BYTES + 1)
-    except Exception as e:  # 网络/超时/过大统一降级，不 500
+    except Exception as e:  # 网络/超时/过大/重定向被拦统一降级，不 500
         return None, f"文件拉取失败（{type(e).__name__}），本次先忽略该文件"
     if len(raw) > MAX_FILE_BYTES:
         return None, "文件超过 25MB 上限，本次先忽略该文件"
