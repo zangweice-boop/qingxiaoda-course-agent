@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import evals_client
-from evals_client import EvalsUnavailable
+from evals_client import EvalsUnavailable, extract_signals
 
 SKILL_DIR = Path(__file__).resolve().parent / "skill"
 FILES_DIR = Path(__file__).resolve().parent / "generated_files"
@@ -61,6 +61,7 @@ INTRO = """你好！我是**选课指南**智能体 📚
 
 我能帮你：
 - **查具体课程/老师**：如「微积分哪个老师好」「艾颖华怎么样」「线性代数避雷」
+- **多课/多老师对比**：如「微积分和线性代数哪个好」「艾老师和杨老师怎么选」，横向比均分、样本与评论信号
 - **求推荐/规划**：如「下学期帮我选课」「秋季求稳怎么选」——我会先确认学期、目标导向和已锁定的课
 - **总览**：发「总览」看库内全部课程评价排行
 
@@ -101,15 +102,8 @@ QUERY_PAT = re.compile(r"哪个|怎么样|怎么选|如何|啥样|推荐|查|评
 GREETING_PAT = re.compile(r"^\s*(你好|您好|hi|hello|在吗|你是谁|你能做什么|介绍.*自己|帮我什么)[!！。~\s]*$", re.I)
 SEMESTER_Q_PAT = re.compile(r"哪.*学期|什么学期|什么时候上|哪个学期|几学期")
 REPORT_PAT = re.compile(r"报告|导出|文件|清单|下载|发我.*文件")
-SIGNAL_RULES = [
-    ("给分好", ["调分", "给分好", "卡绩不", "优秀率"]),
-    ("工作量小", ["作业少", "任务量小", "作业极少", "周只有", r"只有\d+次作业"]),
-    ("工作量大", ["任务量大", "作业多", "任务重"]),
-    ("讲课好", ["讲得很好", "讲得好", "笔记清晰", "严谨", "课件好", "很全面"]),
-    ("讲课一般", ["照念", "念ppt", "无聊", "睡觉"]),
-    ("难度高", ["难度", "逆天", "硬核", "很难"]),
-    ("水", ["比较水", "很水", "上课水"]),
-]
+# 迭代追问：要求换一门/另一门课（与课程查询区分，如「那另一门呢」「换一门看看」）
+ITERATION_PAT = re.compile(r"另一门|换一门|其他课|别的课|别的呢|其他的呢|还有哪些|还有.*呢")
 DOWNLOAD_TIMEOUT = 20
 MAX_FILE_BYTES = 25 * 1024 * 1024
 
@@ -159,7 +153,13 @@ def find_course_mentions(text: str) -> list[dict]:
 
 
 def find_teacher_mentions(text: str, names: list[str]) -> list[str]:
-    return [n for n in names if n and n in text]
+    """识别老师：全名子串优先；未命中时支持「X老师」式简称（取姓氏/首字匹配）。"""
+    hits = [n for n in names if n and n in text]
+    if not hits:
+        # 「X老师」式简称：取「老师」前的姓氏/首字匹配（如「艾老师」→ 艾颖华）
+        for tok in set(re.findall(r"([\u4e00-\u9fa5])(?=老师)", text)):
+            hits.extend(n for n in names if n.startswith(tok))
+    return sorted(set(hits))
 
 
 def parse_semester(text: str) -> str | None:
@@ -191,14 +191,12 @@ def parse_locked(text: str) -> list[str]:
     return sorted(locked)
 
 
-def extract_signals(comments: list[str]) -> str:
-    """从评论原文提取四维信号标签（仅转述，不推断分数）。"""
-    blob = " ".join(comments)
-    found = []
-    for label, kws in SIGNAL_RULES:
-        if any(re.search(k, blob) for k in kws):
-            found.append(label)
-    return "、".join(found)
+def _history_text(all_user_text: str, last_text: str) -> str:
+    """去掉最新一条发言后的历史文本（供迭代追问引用此前提到的课程）。"""
+    lines = [l for l in all_user_text.splitlines() if l.strip()]
+    if lines and lines[-1].strip() == last_text.strip():
+        return "\n".join(lines[:-1])
+    return all_user_text
 
 
 # ---------- 文件产物 ----------
@@ -338,25 +336,46 @@ def _goal_advice(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _comparison_table(rows: list[dict]) -> str:
+    """多课/多老师横向对比表（课+老师粒度，按均分排序）。"""
+    rated = sorted([r for r in rows if r["count"] > 0], key=lambda r: -(r["avg"] or 0))
+    if not rated:
+        return ""
+    lines = ["| 课程 | 老师 | 均分 | 样本 | 评论信号 |", "|---|---|---|---|---|"]
+    for r in rated:
+        sig = extract_signals(r["comments"]) or "—"
+        lines.append(f"| {r['course']} | {r['teacher']} | {r['avg']:g} | {r['count']} | {sig} |")
+    return "\n".join(lines)
+
+
 def _course_answer(names: list[str]) -> AgentResult:
-    """具体课程/老师查询：数据引用 + 分目标建议 + 风险提示 + 致谢。"""
+    """具体课程/老师查询：数据引用 + 横向对比 + 分目标建议 + 风险提示 + 致谢。
+
+    names 含多门课/多位老师时，额外给出「横向对比」表（课+老师粒度）。
+    """
     rows: list[dict] = []
-    label = "课程"
     import evals_client as ec
     for n in names:
         rows.extend(ec.query_course(n))
     if not rows and names:
-        rows = ec.query_teacher(names[0])
-        label = "老师"
+        for n in names:  # 按老师名逐位查询（多老师对比也支持）
+            rows.extend(ec.query_teacher(n))
     rendered = evals_client.render_rows(rows)
     head = f"## {'、'.join(names)} 的评价数据\n\n{rendered}" if rows else \
         f"## {'、'.join(names)}：暂无评价记录\n\n库内没有匹配的评价。**没有评价 ≠ 差**，建议试听第一周、问上过该课的同学。"
-    answer = (f"{head}\n\n### 分目标建议\n\n{_goal_advice(rows)}\n\n"
+    compare = ""
+    if rows and (len({r["course"] for r in rows}) >= 2 or len({r["teacher"] for r in rows}) >= 2):
+        tbl = _comparison_table(rows)
+        if tbl:
+            compare = (f"\n\n### 横向对比\n\n{tbl}\n\n"
+                       f"同一门课按**老师**粒度比较；跨课程比均分、样本与评论信号，"
+                       f"再结合你的目标（求稳 / 想学东西 / 学期已满）看下面分目标建议。")
+    answer = (f"{head}{compare}\n\n### 分目标建议\n\n{_goal_advice(rows)}\n\n"
               f"### 风险提示\n\n{_risk_line(rows)}\n\n{FOOTER}")
     return AgentResult(answer=answer, reasoning=[
         f"查询评价库：{'、'.join(names)}",
         f"命中 {len(rows)} 条「课+老师」记录" if rows else "未命中任何评价记录，如实告知",
-        "按四维框架组装分目标建议",
+        "生成横向对比表" if compare else "按四维框架组装分目标建议",
     ])
 
 
@@ -578,6 +597,19 @@ def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: s
             res = _course_answer(names)
             res.answer = notes_block + res.answer
             return res
+
+        # 迭代追问：「那另一门呢」——引用历史提到的课程，引导给出具体课名继续对比
+        if ITERATION_PAT.search(text):
+            hist_courses = find_course_mentions(_history_text(all_user_text, text))
+            if hist_courses:
+                names = "、".join(sorted({c["name"] for c in hist_courses}))
+                return AgentResult(answer=notes_block + (
+                    f"你刚才问到的是 **{names}**。想对比的话，把另一门课的名字发我即可"
+                    f"（如「{hist_courses[0]['name']} 和概率论哪个好」），"
+                    f"我按均分、样本和评论信号横向比给你。"),
+                    reasoning=["迭代追问：引用历史课程，引导补充课名继续对比"])
+            return AgentResult(answer=notes_block + BOUNDARY_REPLY,
+                               reasoning=["迭代追问但历史无课程 → 说明数据边界"])
 
         if recommend_ctx:
             # 此处 text 必非空（空文本+无文件课程已在上方提前返回）

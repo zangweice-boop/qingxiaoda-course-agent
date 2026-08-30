@@ -102,3 +102,4 @@ def render_rows(rows: list[dict]) -> str:
 
 
 SOURCE_NOTE = qe.SOURCE_NOTE
+extract_signals = qe.extract_signals  # 四维信号提取与 skill 脚本共用一份规则

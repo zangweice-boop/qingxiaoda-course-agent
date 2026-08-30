@@ -13,6 +13,7 @@ COURSE_EVAL_URL / COURSE_EVAL_KEY 覆盖。本脚本只做查询，不写入、�
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -29,6 +30,27 @@ MAX_ROWS = 2000          # 防御性上限：评价库单表超此规模时应�
 COMMENT_BRIEF = 80       # 展示评论时的截断长度
 
 SOURCE_NOTE = "数据来源：无穹书院课程评价系统（学生自发维护，10 分制自评）· 仅校内参考"
+
+# 四维信号规则：评论原文关键词 → 信号标签（仅转述，不推断分数）
+SIGNAL_RULES = [
+    ("给分好", ["调分", "给分好", "卡绩不", "优秀率"]),
+    ("工作量小", ["作业少", "任务量小", "作业极少", "周只有", r"只有\d+次作业"]),
+    ("工作量大", ["任务量大", "作业多", "任务重"]),
+    ("讲课好", ["讲得很好", "讲得好", "笔记清晰", "严谨", "课件好", "很全面"]),
+    ("讲课一般", ["照念", "念ppt", "无聊", "睡觉"]),
+    ("难度高", ["难度", "逆天", "硬核", "很难"]),
+    ("水", ["比较水", "很水", "上课水"]),
+]
+
+
+def extract_signals(comments):
+    """从评论原文提取四维信号标签（仅转述，不推断分数），返回「、」连接的标签串。"""
+    blob = " ".join(comments)
+    found = []
+    for label, kws in SIGNAL_RULES:
+        if any(re.search(k, blob) for k in kws):
+            found.append(label)
+    return "、".join(found)
 
 
 def fetch(table):
@@ -87,6 +109,9 @@ def render_row(row):
         lines.append("- 暂无评价：不代表课程差，只是还没人评，建议询问上过该课的同学")
     elif row["count"] < 3:
         lines.append("- ⚠️ 样本量少（不足 3 条），评分参考价值有限，请结合评论内容判断")
+    sig = extract_signals(row["comments"])
+    if sig:
+        lines.append(f"- 评论信号：{sig}")
     return "\n".join(lines)
 
 

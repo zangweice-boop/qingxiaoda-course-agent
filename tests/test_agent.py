@@ -79,6 +79,49 @@ def test_teacher_query():
     assert "艾老师" in r.answer
 
 
+def test_teacher_partial_name_fuzzy():
+    """「X老师」式简称可匹配全名（如「艾老师」→ 艾颖华）。"""
+    names = ["艾颖华", "杨晶", "王小明"]
+    assert set(agent.find_teacher_mentions("艾老师怎么样", names)) == {"艾颖华"}
+    assert set(agent.find_teacher_mentions("杨老师和艾老师哪个好", names)) == {"艾颖华", "杨晶"}
+    assert agent.find_teacher_mentions("哪个老师好", names) == []
+
+
+def test_multi_course_comparison():
+    """多门课同问 → 输出「横向对比」表。"""
+    r = run("微积分和线性代数哪个好")
+    assert "横向对比" in r.answer
+    assert "微积分A(1)" in r.answer
+    assert "线性代数" in r.answer
+
+
+def test_multi_teacher_comparison():
+    """多位老师同问 → 输出「横向对比」表（逐位查询，不丢人）。"""
+    r = run("艾老师和王老师哪个好")
+    assert "横向对比" in r.answer
+
+
+def test_single_no_rating_no_comparison():
+    """库内无该课评价 → 如实告知，无对比表。"""
+    r = run("概率论怎么样")
+    assert "暂无评价" in r.answer
+    assert "横向对比" not in r.answer
+
+
+def test_iteration_followup_refers_history():
+    """「那另一门呢」→ 引用历史提到的课程，引导给出课名继续对比。"""
+    all_t = "微积分哪个老师好\n那另一门呢"
+    r = agent.run_agent(all_t, "那另一门呢", [{"type": "text", "text": "那另一门呢"}], "http://test")
+    assert "微积分A(1)" in r.answer
+    assert "另一门" in r.answer
+
+
+def test_iteration_without_history_boundary():
+    """无历史课程可引用的迭代追问 → 边界回复。"""
+    r = run("那另一门呢")
+    assert "边界" in r.answer
+
+
 def test_semester_question():
     r = run("概率论什么时候上")
     assert "春季学期" in r.answer
