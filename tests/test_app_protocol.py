@@ -134,6 +134,45 @@ def test_max_tokens_1_accepted(client):
     assert r.status_code == 200
 
 
+def test_max_tokens_truncates_non_stream(client):
+    """max_tokens 语义：按 2 字符/token 截断，finish_reason=length，usage 反映截断。"""
+    body = {"max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}
+    d = client.post("/v1/chat/completions", headers=H, json=body).json()
+    assert d["choices"][0]["finish_reason"] == "length"
+    assert len(d["choices"][0]["message"]["content"]) <= 2  # 「测试回答内容」→「测试」
+    assert d["usage"]["completion_tokens"] == 1
+
+
+def test_max_tokens_truncates_stream(client):
+    body = {"stream": True, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}
+    with client.stream("POST", "/v1/chat/completions", headers=H, json=body) as resp:
+        assert resp.status_code == 200
+        text = "".join(resp.iter_text())
+    frames = parse_sse(text)
+    stop = frames[-2]
+    assert stop["choices"][0]["finish_reason"] == "length"
+    content = "".join(f["choices"][0]["delta"].get("content", "") for f in frames
+                      if f and f["choices"][0]["delta"].get("content"))
+    assert content == "测试"
+
+
+# ---------- 启动预热 ----------
+
+def test_warmup_best_effort_on_failure(monkeypatch):
+    """预热失败不抛异常（best-effort，不影响启动，首次请求会重试）。"""
+
+    def boom():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(app_mod.evals_client, "warm_cache", boom)
+    app_mod._warmup()  # 不应抛异常
+
+
+def test_warmup_success(monkeypatch):
+    monkeypatch.setattr(app_mod.evals_client, "warm_cache", lambda: 27)
+    app_mod._warmup()  # 不应抛异常
+
+
 # ---------- 输入收集（collect_user_input） ----------
 
 def test_collect_user_input_file_only():

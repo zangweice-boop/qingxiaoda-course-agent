@@ -96,8 +96,8 @@ GOAL_PATTERNS = [
 ]
 GOAL_LABELS = {"gpa": "保 GPA/求稳", "interest": "兴趣/打基础", "workload": "学期已满求轻"}
 RECOMMEND_PAT = re.compile(r"推荐|怎么选|选什么|哪门|哪门课|总览|全部|排行|排名|帮我选|选课|课表|规划|求稳|避雷")
-# 课程「查询味」的句子（与约束短回复区分，如「线代锁了」不是查询）
-QUERY_PAT = re.compile(r"哪个|怎么样|怎么选|如何|啥样|推荐|查|评价|避雷")
+# 课程「查询味」的句子（与约束短回复区分，如「线代锁了」不是查询；「什么时候上」是查询）
+QUERY_PAT = re.compile(r"哪个|怎么样|怎么选|如何|啥样|推荐|查|评价|避雷|什么时候上|哪些|什么课")
 GREETING_PAT = re.compile(r"^\s*(你好|您好|hi|hello|在吗|你是谁|你能做什么|介绍.*自己|帮我什么)[!！。~\s]*$", re.I)
 SEMESTER_Q_PAT = re.compile(r"哪.*学期|什么学期|什么时候上|哪个学期|几学期")
 REPORT_PAT = re.compile(r"报告|导出|文件|清单|下载|发我.*文件")
@@ -500,7 +500,7 @@ def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: s
     file_notes: list[str] = []
     file_courses: list[dict] = []
     for p in parts:
-        if p["type"] == "file":
+        if p.get("type") == "file":
             f = p.get("file") or {}
             fname = f.get("filename") or "未命名文件"
             if f.get("url"):
@@ -517,7 +517,7 @@ def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: s
                         file_notes.append(f"📎 已读取《{fname}》（{len(text)} 字符），未识别出评价库覆盖的课程；可以把课程名直接发我。")
             else:
                 file_notes.append(f"📎 收到文件《{fname}》（file_id 方式），该承载方式暂未接入，请改用 URL 或直接粘贴内容。")
-        elif p["type"] in ("image_url", "input_audio"):
+        elif p.get("type") in ("image_url", "input_audio"):
             kind = "图片" if p["type"] == "image_url" else "音频"
             file_notes.append(f"📎 收到{kind}附件：我目前专注选课文本场景，暂时看不了{kind}，文字描述给我即可。")
 
@@ -550,9 +550,10 @@ def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: s
         teachers = find_teacher_mentions(text, evals_client.all_teacher_names())
         courses = find_course_mentions(text)
 
-        # 求推荐语境：全量发言里有推荐信号，或学期+目标约束已齐（如首句即「秋季，保GPA」）
-        recommend_ctx = bool(RECOMMEND_PAT.search(all_user_text)) or (
-            parse_semester(all_user_text) and parse_goal(all_user_text))
+        # 求推荐语境：全量发言里有推荐信号，或已有学期/目标/锁定任一约束——
+        # 单个约束词（如「秋季」「保GPA」）单独出现也能进入推荐流程，而不是边界回复
+        recommend_ctx = bool(RECOMMEND_PAT.search(all_user_text)) or bool(
+            parse_semester(all_user_text) or parse_goal(all_user_text) or parse_locked(all_user_text))
         # 约束回答语境：最新一句是学期/目标/锁定课的短回复（「秋季，保GPA」「线代锁了」）——
         # 即使提到课程名（锁定语境），也走求推荐流程而非课程查询
         constraint_reply = bool(parse_semester(text) or parse_goal(text) or parse_locked(text)) \

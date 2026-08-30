@@ -26,7 +26,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 ## 协议实现清单（对照开发者指南）
 
-- **L0 必须**：`POST /chat/completions` + `GET /models`；Bearer 鉴权、无效凭证 401（兼容 `x-api-key`）；`stream` 严格按 JSON 布尔解析；流式帧序列 role → content → stop（usage 合并于 stop 帧）→ `data: [DONE]`；`finish_reason` 只用白名单值；`usage` 必返（字符数估算）；`model` 缺失/空时忽略；`role=tool` 跳过；接受 `max_tokens:1`
+- **L0 必须**：`POST /chat/completions` + `GET /models`；Bearer 鉴权、无效凭证 401（兼容 `x-api-key`，常量时间比较）；`stream` 严格按 JSON 布尔解析；流式帧序列 role → content → stop（usage 合并于 stop 帧）→ `data: [DONE]`；`finish_reason` 只用白名单值；`usage` 必返（字符数估算）；`model` 缺失/空时忽略；`role=tool` 跳过；`max_tokens` 按 2 字符/token 近似**截断输出**（截断时 `finish_reason="length"`）
 - **L1 思考过程**：查询/组装步骤经 `delta.reasoning` 流式输出
 - **L2 多模态**：
   - 输入 `file`：按 URL **当次拉取**（防签名过期），文本类（txt/markdown 等）解析并识别培养方案课程；二进制（pdf/word）如实说明只支持文本粘贴
@@ -35,6 +35,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 - **sessionId**：接收并记日志；agent 设计为**无状态**（约束从全量 messages 解析），多轮追问天然可用
 - **SSRF 防护**：文件 URL 拉取前解析主机，拒绝私网/环回/保留地址（`ALLOW_PRIVATE_FILE_HOSTS=1` 仅限本地联调）；**重定向逐跳校验**，任何一跳落到内网即拒绝
 - **请求体上限**：`MAX_BODY_BYTES=1MB`，超大 body 返回 413（Content-Length 中间件 + chunked 兜底）
+- **启动预热**：lifespan 后台线程预热评价库缓存（best-effort，失败不阻塞启动，首次请求会重试）
 - **超时纪律**：评价库查询 30s 超时 + 5 分钟缓存；文件拉取 20s；全链路远低于网关 120s 上限
 
 ## 自测（指南 §8 清单）

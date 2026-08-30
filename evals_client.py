@@ -60,6 +60,12 @@ def _load_data() -> tuple[list, list, dict]:
     return teachers, ratings, qe.aggregate(teachers, ratings, catalog)
 
 
+def warm_cache() -> int:
+    """启动预热：拉取评价库并填充缓存，返回老师数；失败抛 EvalsUnavailable。"""
+    teachers, _, _ = _load_data()
+    return len(teachers)
+
+
 def all_teacher_names() -> list[str]:
     """库内全部老师姓名（供意图识别做关键词匹配）。"""
     teachers, _, _ = _load_data()

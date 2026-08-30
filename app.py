@@ -15,13 +15,16 @@ import hmac
 import json
 import logging
 import os
+import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import agent
+import evals_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("course-agent")
@@ -37,8 +40,25 @@ if not PUBLIC_BASE_URL:
     log.warning("PUBLIC_BASE_URL 未设置：附件下载地址将按请求 Host 头拼接，请在生产环境显式配置公网域名")
 
 MAX_BODY_BYTES = 1 * 1024 * 1024  # 请求体上限：messages 历史足够，防超大 body 占用内存
+CHARS_PER_TOKEN = 2               # max_tokens 截断用：中文场景 2 字符 ≈ 1 token
 
-app = FastAPI(title="course-selection-guide for qingxiaoda", version="1.1.0")
+
+def _warmup():
+    """启动后台预热评价库缓存（best-effort：失败不阻塞启动，首次请求会重试）。"""
+    try:
+        n = evals_client.warm_cache()
+        log.info("评价库预热完成：%d 位老师", n)
+    except Exception as e:
+        log.warning("评价库预热失败（不影响启动，首次请求将重试）：%s", e)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    threading.Thread(target=_warmup, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="course-selection-guide for qingxiaoda", version="1.2.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -150,6 +170,18 @@ async def chat_completions(request: Request,
 
     log.info("session=%s stream=%s last_text=%r attachments=%d",
              session_id, stream, last_text[:50], len(result.attachments))
+
+    # max_tokens 语义：按 2 字符/token 近似截断输出（中文场景合理近似），
+    # 截断时 finish_reason 用 "length"（白名单值），usage 按截断后内容估算
+    max_tokens = body.get("max_tokens")
+    truncated = False
+    if isinstance(max_tokens, (int, float)) and not isinstance(max_tokens, bool) and max_tokens > 0:
+        max_chars = int(max_tokens) * CHARS_PER_TOKEN
+        if len(result.answer) > max_chars:
+            result.answer = result.answer[:max_chars]
+            truncated = True
+    finish = "length" if truncated else "stop"
+
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
     usage = estimate_usage(all_user_text, result.answer)
@@ -160,7 +192,7 @@ async def chat_completions(request: Request,
             "id": cid, "object": "chat.completion", "created": created, "model": MODEL_ID,
             "choices": [{"index": 0,
                          "message": {"role": "assistant", "content": result.answer},
-                         "finish_reason": "stop"}],
+                         "finish_reason": finish}],
             "usage": usage,
         }
         if x_soda:
@@ -168,11 +200,11 @@ async def chat_completions(request: Request,
         return JSONResponse(resp)
 
     def sse():
-        def frame(delta=None, finish=None, usage=None, x_soda=None, error=None):
+        def frame(delta=None, fr=None, usage=None, x_soda=None, error=None):
             chunk = {"id": cid, "object": "chat.completion.chunk", "created": created,
                      "model": MODEL_ID, "choices": [{"index": 0,
                                                      "delta": delta or {},
-                                                     "finish_reason": finish}]}
+                                                     "finish_reason": fr}]}
             if usage:
                 chunk["usage"] = usage
             if x_soda:
@@ -187,10 +219,10 @@ async def chat_completions(request: Request,
                 yield frame({"reasoning": step})
             for i in range(0, len(result.answer), 24):                  # content 增量
                 yield frame({"content": result.answer[i:i + 24]})
-            yield frame({}, finish="stop", usage=usage,                 # stop 帧 + usage + attachments
+            yield frame({}, fr=finish, usage=usage,                     # stop 帧 + usage + attachments
                        x_soda=x_soda)
         except Exception as e:  # 头已发出：stop 帧附 error，不发 finish_reason:"error"
-            yield frame({}, finish="stop",
+            yield frame({}, fr="stop",
                        error={"type": "upstream_error", "message": f"{type(e).__name__}: {e}"})
         yield "data: [DONE]\n\n"                                        # 终止哨兵
 

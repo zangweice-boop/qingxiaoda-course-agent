@@ -150,6 +150,21 @@ def test_first_message_full_constraints():
     assert "库内课程总览·秋季学期" in r.answer
 
 
+def test_partial_constraint_alone_goes_recommend():
+    """单一约束词（「秋季」「保GPA」）单独出现也进入推荐流程，回显已记下。"""
+    r = run("秋季")
+    assert "已记下：秋季学期" in r.answer
+    r2 = run("保GPA")
+    assert "已记下：保 GPA/求稳" in r2.answer
+
+
+def test_semester_question_not_hijacked_by_constraint_routing():
+    """「什么时候上」是课程查询，不能被约束路由劫持成推荐流程。"""
+    r = run("大一下什么时候上概率论")
+    assert "春季学期" in r.answer
+    assert "一次问全三件事" not in r.answer
+
+
 def test_course_query_not_swallowed_by_constraint_routing():
     """推荐语境中带课程查询味的句子仍走课程查询。"""
     all_t = "帮我选课\n微积分哪个老师好"
@@ -177,6 +192,13 @@ def test_file_with_binary_note(monkeypatch):
     parts = [{"type": "file", "file": {"url": "http://x/a.pdf", "filename": "a.pdf"}}]
     r = agent.run_agent("帮我看看", "帮我看看", parts, "http://test")
     assert "二进制" in r.answer
+
+
+def test_part_without_type_ignored():
+    """content part 缺 type 键不崩溃（防御性访问）。"""
+    parts = [{"foo": "bar"}]
+    r = agent.run_agent("你好", "你好", parts, "http://test")
+    assert "选课指南" in r.answer
 
 
 # ---------- 评价库宕机降级 ----------
