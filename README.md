@@ -70,6 +70,15 @@ curl -s -X POST "$BASE/chat/completions" -H "Authorization: Bearer $KEY" \
 
 > 注 5 中本机文件服务地址需 `ALLOW_PRIVATE_FILE_HOSTS=1`；生产环境清小搭下发的是其 OSS 公网域名，无需放开。
 
+## 自动化测试
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest          # 评价库访问已 mock，离线可跑
+```
+
+覆盖：协议层（Bearer/x-api-key 鉴权、stream 严格布尔、SSE 帧序 role→reasoning→content→stop(usage/attachments)→[DONE]、max_tokens:1）+ agent 层（意图识别、约束解析、已锁定课程排除、纯文件消息、评价库宕机降级）。
+
 ## 与清小搭多模态能力的对应
 
 | 能力 | 本服务 |

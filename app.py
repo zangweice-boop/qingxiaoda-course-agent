@@ -52,11 +52,18 @@ def request_base_url(request: Request) -> str:
 
 
 def collect_user_input(messages: list) -> tuple[str, str, list[dict]]:
-    """从 messages 提取：全部用户发言拼接（约束解析用）、最新用户文本、最新用户 content parts。
+    """从 messages 提取：全部用户发言拼接、最新一条用户消息的文本、最新一条用户消息的 content parts。
+
+    - 约束解析用「全部用户发言」（无状态多轮）
+    - 意图识别用「最新一条用户消息的文本」（可能为空串，如纯文件消息）
+    - 多模态输入（file/image_url/input_audio）从「最新一条用户消息的 parts」解析——
+      即使该消息没有文本（如用户只传培养方案文件），文件也不能丢
 
     role=tool 直接跳过；content 兼容字符串与多模态数组两种形态。
     """
-    all_user_texts, last_text, last_parts = [], "", [{"type": "text", "text": ""}]
+    all_user_texts: list[str] = []
+    last_text = ""
+    last_parts: list[dict] = []
     for m in messages:
         if m.get("role") != "user":
             continue
@@ -70,7 +77,7 @@ def collect_user_input(messages: list) -> tuple[str, str, list[dict]]:
         texts = " ".join(str(p.get("text", "")) for p in parts if p.get("type") == "text").strip()
         if texts:
             all_user_texts.append(texts)
-            last_text, last_parts = texts, parts
+        last_text, last_parts = texts, parts  # 始终以最新一条用户消息为准
     return "\n".join(all_user_texts), last_text, last_parts
 
 

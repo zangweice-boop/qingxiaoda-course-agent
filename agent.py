@@ -72,6 +72,8 @@ GOAL_PATTERNS = [
 ]
 GOAL_LABELS = {"gpa": "保 GPA/求稳", "interest": "兴趣/打基础", "workload": "学期已满求轻"}
 RECOMMEND_PAT = re.compile(r"推荐|怎么选|选什么|哪门|哪门课|总览|全部|排行|排名|帮我选|选课|课表|规划|求稳|避雷")
+# 课程「查询味」的句子（与约束短回复区分，如「线代锁了」不是查询）
+QUERY_PAT = re.compile(r"哪个|怎么样|怎么选|如何|啥样|推荐|查|评价|避雷")
 GREETING_PAT = re.compile(r"^\s*(你好|您好|hi|hello|在吗|你是谁|你能做什么|介绍.*自己|帮我什么)[!！。~\s]*$", re.I)
 SEMESTER_Q_PAT = re.compile(r"哪.*学期|什么学期|什么时候上|哪个学期|几学期")
 REPORT_PAT = re.compile(r"报告|导出|文件|清单|下载|发我.*文件")
@@ -148,6 +150,21 @@ def parse_goal(text: str) -> str | None:
         if re.search(pat, text, re.I):
             return key
     return None
+
+
+# 已锁定/不想动的课：出现在同一句话里的课程名视为锁定（如「线代锁了」「英语已选」）
+LOCKED_PAT = re.compile(r"已锁定|锁了|锁定|已选|选了|不想动|躲不开|跑不掉")
+
+
+def parse_locked(text: str) -> list[str]:
+    """从全部用户发言中解析「已锁定、不想动的课」，返回目录课程名（含别名识别）。"""
+    locked: dict[str, str] = {}
+    for line in text.splitlines():
+        if not LOCKED_PAT.search(line):
+            continue
+        for c in find_course_mentions(line):
+            locked[c["name"]] = c["name"]
+    return sorted(locked)
 
 
 def extract_signals(comments: list[str]) -> str:
@@ -310,11 +327,22 @@ def _overview_report(semester: str | None, rows_rated, rows_none, advice: str) -
     return "\n".join(lines)
 
 
-def _overview_answer(semester: str | None, goal: str | None, base_url: str, want_report: bool) -> AgentResult:
-    """总览/求推荐：先给数据表，再按目标导向给建议，附完整报告文件。"""
+def _overview_answer(semester: str | None, goal: str | None, base_url: str,
+                     locked: list[str] | None = None) -> AgentResult:
+    """总览/求推荐：先给数据表，再按目标导向给建议，附完整报告文件。
+
+    locked: 用户已锁定、不想动的课程名列表，从数据表与建议中排除。
+    """
     rated, none_rated = evals_client.summary_rows()
-    sem_rows = [r for r in rated if not semester or r["semester"] == semester]
+    locked_names = set(locked or [])
+    candidate = [r for r in rated if not semester or r["semester"] == semester]
+    sem_rows = [r for r in candidate if r["course"] not in locked_names]
     if not sem_rows:
+        if candidate:
+            return AgentResult(
+                answer=f"{semester or '本季'} 带评价的课程里，你锁定的课程已全部排除"
+                       f"（{'、'.join(sorted(locked_names))}），剩余暂无其他可参考的评价数据。\n\n{FOOTER}",
+                reasoning=[f"查询总览（{semester or '全部'}）并排除锁定课程：结果为空"])
         return AgentResult(
             answer=f"{semester} 目前库内还没有带评价的课程记录。\n\n{FOOTER}",
             reasoning=[f"查询总览（{semester or '全部'}）：暂无评价数据"])
@@ -342,6 +370,8 @@ def _overview_answer(semester: str | None, goal: str | None, base_url: str, want
         advice = ("综合来看数据最充分的三个选择："
                   + "、".join(f"{r['course']}·{r['teacher']}（{r['avg']:g}/10）" for r in top)
                   + "。搭配上建议一学期「2 难 + 2 中 + 1 稳」，别全押高难度或全押水课。")
+    if locked_names:
+        advice = f"已排除你锁定的课程：{'、'.join(sorted(locked_names))}。\n\n" + advice
     advice_block = (f"### {GOAL_LABELS.get(goal, '综合均衡')}建议\n\n{advice}\n\n"
                     f"### 通用策略\n\n- 必修/限选先落位，再填任选；同一门课**老师 > 课程**，按「课+老师」粒度决策\n"
                     f"- 试听周多试听，退改选窗口内保留调整余地（时间以教务通知为准）\n\n"
@@ -381,6 +411,27 @@ def _db_down_answer(e: EvalsUnavailable) -> AgentResult:
 
 
 # ---------- 主入口 ----------
+
+def _recommend_answer(notes_block: str, all_user_text: str, base_url: str) -> AgentResult:
+    """求推荐流程：约束不全则一次问全并回显已记下的；齐全则出总览+分目标建议+报告附件。
+
+    已锁定课程（parse_locked）从数据表与建议中排除。
+    """
+    semester = parse_semester(all_user_text)
+    goal = parse_goal(all_user_text)
+    locked = parse_locked(all_user_text)
+    if not semester or not goal:
+        q = _constraints_question()
+        got = [x for x in (semester, GOAL_LABELS.get(goal)) if x]
+        if locked:
+            got.append(f"已锁定：{'、'.join(locked)}")
+        q.answer = notes_block + (f"已记下：{'、'.join(got)}。\n\n" if got else "") + q.answer
+        q.reasoning = ["泛泛求推荐，约束不全（学期/目标），一次性问全三件事"]
+        return q
+    res = _overview_answer(semester, goal, base_url, locked)
+    res.answer = notes_block + res.answer
+    return res
+
 
 def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: str) -> AgentResult:
     """执行一轮 agent。
@@ -428,7 +479,8 @@ def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: s
         return AgentResult(answer=INTRO, reasoning=["无实质输入，返回能力介绍"])
 
     if GREETING_PAT.match(text) and not file_courses:
-        return AgentResult(answer=INTRO, reasoning=["问候/能力询问 → 返回介绍"])
+        return AgentResult(answer=(notes_block + INTRO) if notes_block else INTRO,
+                           reasoning=["问候/能力询问 → 返回介绍"])
 
     try:
         if file_courses:
@@ -445,6 +497,17 @@ def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: s
 
         teachers = find_teacher_mentions(text, evals_client.all_teacher_names())
         courses = find_course_mentions(text)
+
+        # 求推荐语境：全量发言里有推荐信号，或学期+目标约束已齐（如首句即「秋季，保GPA」）
+        recommend_ctx = bool(RECOMMEND_PAT.search(all_user_text)) or (
+            parse_semester(all_user_text) and parse_goal(all_user_text))
+        # 约束回答语境：最新一句是学期/目标/锁定课的短回复（「秋季，保GPA」「线代锁了」）——
+        # 即使提到课程名（锁定语境），也走求推荐流程而非课程查询
+        constraint_reply = bool(parse_semester(text) or parse_goal(text) or parse_locked(text)) \
+            and not QUERY_PAT.search(text)
+
+        if recommend_ctx and constraint_reply:
+            return _recommend_answer(notes_block, all_user_text, base_url)
 
         if teachers:
             names = sorted(set(teachers))
@@ -463,20 +526,9 @@ def run_agent(all_user_text: str, last_text: str, parts: list[dict], base_url: s
             res.answer = notes_block + res.answer
             return res
 
-        # 求推荐语境扫全量用户发言：约束往往在追问后的短回复里给出（如「秋季，保GPA」），
-        # 单看最新一句会漏；具体课程/老师命中已在前面分支优先处理，不会误伤
-        if text and RECOMMEND_PAT.search(all_user_text):
-            semester = parse_semester(all_user_text)
-            goal = parse_goal(all_user_text)
-            if not semester or not goal:
-                q = _constraints_question()
-                got = [x for x in (semester, GOAL_LABELS.get(goal)) if x]
-                q.answer = notes_block + (f"已记下：{'、'.join(got)}。\n\n" if got else "") + q.answer
-                q.reasoning = ["泛泛求推荐，约束不全（学期/目标），一次性问全三件事"]
-                return q
-            res = _overview_answer(semester, goal, base_url, want_report)
-            res.answer = notes_block + res.answer
-            return res
+        if recommend_ctx:
+            # 此处 text 必非空（空文本+无文件课程已在上方提前返回）
+            return _recommend_answer(notes_block, all_user_text, base_url)
 
         return AgentResult(answer=notes_block + BOUNDARY_REPLY,
                            reasoning=["未识别出库内课程/老师，也不是求推荐 → 说明数据边界"])
